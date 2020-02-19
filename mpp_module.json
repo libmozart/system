@@ -1,0 +1,4 @@
+{
+  "Name": "System",
+  "Deps": ["Core", "String"]
+}
