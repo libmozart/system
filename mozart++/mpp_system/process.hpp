@@ -17,9 +17,7 @@
 #include <memory>
 
 #ifdef MOZART_PLATFORM_WIN32
-
 #include <Windows.h>
-
 #else
 #include <sys/stat.h>
 #include <sys/wait.h>
