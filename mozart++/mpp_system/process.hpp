@@ -17,11 +17,15 @@
 #include <memory>
 
 #ifdef MOZART_PLATFORM_WIN32
+
 #include <Windows.h>
+
 #else
+
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <csignal>
+
 #endif
 
 namespace mpp_impl {
@@ -236,6 +240,11 @@ namespace mpp_impl {
             }
 
             // run subprocess
+            /**
+             * TODO:
+             * Searching PATH in Linux(execvpe) and Unix(Manual)
+             * Avoid throwing exception in child process
+             */
             ::execve(argv[0], argv, envp);
             mpp::throw_ex<mpp::runtime_error>("unable to exec commands in subprocess");
 
@@ -469,18 +478,24 @@ namespace mpp {
         friend class process_builder;
 
     private:
-        process_info _info;
-        int _exit_code = -1;
-        std::unique_ptr<fdostream> _stdin;
-        std::unique_ptr<fdistream> _stdout;
-        std::unique_ptr<fdistream> _stderr;
+        struct _member_holder {
+            process_info _info;
+            fdostream _stdin;
+            fdistream _stdout;
+            fdistream _stderr;
+            int _exit_code = -1;
 
-        explicit process(const process_info &info)
-                : _info(info),
-                  _stdin(std::make_unique<fdostream>(_info._stdin)),
-                  _stdout(std::make_unique<fdistream>(_info._stdout)),
-                  _stderr(std::make_unique<fdistream>(_info._stderr)) {
-        }
+            explicit _member_holder(const process_info &info) : _info(info), _stdin(_info._stdin),
+                                                                _stdout(_info._stdout), _stderr(_info._stdout) {}
+
+            ~_member_holder() {
+                mpp_impl::close_process(_info);
+            }
+        };
+
+        std::unique_ptr<_member_holder> _this;
+
+        explicit process(const process_info &info) : _this(std::make_unique<_member_holder>(info)) {}
 
     public:
         process() = delete;
@@ -494,36 +509,34 @@ namespace mpp {
         process &operator=(const process &) = delete;
 
     public:
-        ~process() {
-            mpp_impl::close_process(_info);
-        }
+        ~process() = default;
 
         std::ostream &in() {
-            return *_stdin;
+            return _this->_stdin;
         }
 
         std::istream &out() {
-            return *_stdout;
+            return _this->_stdout;
         }
 
         std::istream &err() {
-            return *_stderr;
+            return _this->_stderr;
         }
 
         int wait_for() {
-            if (is_exited() && _exit_code >= 0) {
-                return _exit_code;
+            if (is_exited() && _this->_exit_code >= 0) {
+                return _this->_exit_code;
             }
-            _exit_code = mpp_impl::wait_for(_info);
-            return _exit_code;
+            _this->_exit_code = mpp_impl::wait_for(_this->_info);
+            return _this->_exit_code;
         }
 
         bool is_exited() const {
-            return mpp_impl::process_exited(_info);
+            return mpp_impl::process_exited(_this->_info);
         }
 
         void interrupt(bool force = false) {
-            mpp_impl::terminate_process(_info, force);
+            mpp_impl::terminate_process(_this->_info, force);
         }
 
     public:
