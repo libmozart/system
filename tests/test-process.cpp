@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <mozart++/string>
 #include <mozart++/process>
 
 #ifdef MOZART_PLATFORM_WIN32
@@ -29,6 +30,34 @@ void test_basic() {
     while (std::getline(p.out(), s)) {
         printf("process: test-basic: %s\n", s.c_str());
     }
+}
+
+void test_execvpe_unix() {
+#ifndef MOZART_PLATFORM_WIN32
+    process p = process::exec("ls");
+    p.wait_for();
+
+    std::string s;
+    while (std::getline(p.out(), s)) {
+        printf("process: test_execvpe_unix: %s\n", s.c_str());
+    }
+#endif
+}
+
+void test_error_unix() {
+#ifndef MOZART_PLATFORM_WIN32
+    try {
+        process p = process::exec("no-such-command");
+        p.wait_for();
+    } catch (const mpp::runtime_error &e) {
+        printf("%s\n", e.what());
+
+        if (!mpp::string_ref(e.what()).contains("No such file or directory")) {
+            printf("process: test_error_unix: failed\n");
+            exit(1);
+        }
+    }
+#endif
 }
 
 void test_stderr() {
@@ -136,6 +165,8 @@ void test_exit_code() {
 
 int main(int argc, const char **argv) {
     test_basic();
+    test_execvpe_unix();
+    test_error_unix();
     test_stderr();
     test_env();
     test_r_file();
