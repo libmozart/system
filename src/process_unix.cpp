@@ -39,12 +39,9 @@ extern char **environ;
 #endif
 
 namespace mpp_impl {
-    static constexpr int FAIL_FILENO = STDERR_FILENO + 1;
-
-    static bool close_all_descriptors() {
+    static bool close_all_descriptors(int from_fd, int fail_fd) {
         DIR *dp = nullptr;
         struct dirent64 *dirp = nullptr;
-        int from_fd = FAIL_FILENO + 1;
 
         // We're trying to close all file descriptors, but opendir() might\
         // itself be implemented using a file descriptor, and we certainly
@@ -65,8 +62,9 @@ namespace mpp_impl {
         // use readdir64 in case of fd > 1024
         while ((dirp = readdir64(dp)) != nullptr) {
             int fd;
-            if (std::isdigit(dirp->d_name[0]) &&
-                (fd = strtol(dirp->d_name, nullptr, 10)) >= from_fd + 2) {
+            if (std::isdigit(dirp->d_name[0])
+                && (fd = strtol(dirp->d_name, nullptr, 10)) >= from_fd + 2
+                && fd != fail_fd) {
                 close(fd);
             }
         }
@@ -261,13 +259,11 @@ namespace mpp_impl {
     static void child_proc(const process_startup &startup, process_info &info,
                            fd_type *pstdin, fd_type *pstdout, fd_type *pstderr,
                            fd_type *pfail) {
-        try {
-            // close child side of read pipe
-            close_fd(pfail[PIPE_READ]);
-            // and preserve the fail write pipe
-            dup2(pfail[PIPE_WRITE], FAIL_FILENO);
-            close_fd(pfail[PIPE_WRITE]);
+        // close child side of read pipe
+        close_fd(pfail[PIPE_READ]);
+        int fail_fd = pfail[PIPE_WRITE];
 
+        try {
             if (!startup._stdin.redirected()) {
                 close_fd(pstdin[PIPE_WRITE]);
             }
@@ -329,10 +325,14 @@ namespace mpp_impl {
             }
 
             // close everything
-            if (!close_all_descriptors()) {
+            if (!close_all_descriptors(STDERR_FILENO + 1, fail_fd)) {
                 // try luck failed, close the old way
                 int max_fd = static_cast<int>(sysconf(_SC_OPEN_MAX));
-                for (int fd = FAIL_FILENO + 1; fd < max_fd; fd++) {
+                for (int fd = STDERR_FILENO + 1; fd < max_fd; fd++) {
+                    // do not close fail pipe
+                    if (fd == fail_fd) {
+                        continue;
+                    }
                     if (close(fd) == -1 && errno != EBADF) {
                         // oops, we cannot close this fd
                         // TODO: should we report this as an error?
@@ -349,7 +349,7 @@ namespace mpp_impl {
 
             // make 100% sure the fail pipe will be closed,
             // or the parent may get stuck in read_fully.
-            if (fcntl(FAIL_FILENO, F_SETFD, FD_CLOEXEC) == -1) {
+            if (fcntl(fail_fd, F_SETFD, FD_CLOEXEC) == -1) {
                 // oops, we lost our double-insurance
                 throw mpp::runtime_error();
             }
@@ -364,11 +364,11 @@ namespace mpp_impl {
                 int errnum = errno;
                 ssize_t result = 0;
                 do {
-                    result = write(FAIL_FILENO, &errnum, sizeof(errnum));
+                    result = write(fail_fd, &errnum, sizeof(errnum));
                 } while ((result == -1) && (errno == EINTR));
             } // destroy errnum explicitly.
 
-            close(FAIL_FILENO);
+            close(fail_fd);
             _exit(-1);
         }
     }
@@ -394,7 +394,6 @@ namespace mpp_impl {
 
         } else {
             // in parent process
-            // RAII for pfail
 
             // receive exec call result form child
             close_fd(pfail[PIPE_WRITE]);
