@@ -75,6 +75,36 @@ namespace mpp_impl {
         return true;
     }
 
+    /*
+     * Reads nbyte bytes from file descriptor fd into buf,
+     * The read operation is retried in case of EINTR or partial reads.
+     *
+     * Returns number of bytes read (normally nbyte, but may be less in
+     * case of EOF).  In case of read errors, returns -1 and sets errno.
+     */
+    mpp::ssize_t read_fully(int fd, void *buf, size_t nbyte) {
+        ssize_t remaining = nbyte;
+        while (true) {
+            ssize_t n = read(fd, buf, remaining);
+            if (n == 0) {
+                return nbyte - remaining;
+            } else if (n > 0) {
+                remaining -= n;
+                if (remaining <= 0) {
+                    return nbyte;
+                }
+                // We were interrupted in the middle of reading the bytes.
+                // Unlikely, but possible.
+                buf = reinterpret_cast<void *>(reinterpret_cast<char *>(buf) + n);
+            } else if (errno == EINTR) {
+                // we received some strange signals, which interrupted the
+                // read system call, we just proceed to continue reading.
+            } else {
+                return -1;
+            }
+        }
+    }
+
     /**
      * If PATH is not defined, the OS provides some default value.
      */
@@ -228,109 +258,163 @@ namespace mpp_impl {
         }
     }
 
-    static void child_proc(const process_startup &startup,
-                           process_info &info,
-                           fd_type *pstdin, fd_type *pstdout, fd_type *pstderr) {
-        // in child process
-        if (!startup._stdin.redirected()) {
-            close_fd(pstdin[PIPE_WRITE]);
-        }
-        if (!startup._stdout.redirected()) {
-            close_fd(pstdout[PIPE_READ]);
-        }
+    static void child_proc(const process_startup &startup, process_info &info,
+                           fd_type *pstdin, fd_type *pstdout, fd_type *pstderr,
+                           fd_type *pfail) {
+        try {
+            // close child side of read pipe
+            close_fd(pfail[PIPE_READ]);
+            // and preserve the fail write pipe
+            dup2(pfail[PIPE_WRITE], FAIL_FILENO);
+            close_fd(pfail[PIPE_WRITE]);
 
-        dup2(pstdin[PIPE_READ], STDIN_FILENO);
-        dup2(pstdout[PIPE_WRITE], STDOUT_FILENO);
-
-        /*
-         * pay special attention to stderr,
-         * there are 2 cases:
-         *      1. redirect stderr to stdout
-         *      2. redirect stderr to a file
-         */
-        if (startup.merge_outputs) {
-            // redirect stderr to stdout
-            dup2(pstdout[PIPE_WRITE], STDERR_FILENO);
-        } else {
-            // redirect stderr to a file
-            if (!startup._stderr.redirected()) {
-                close_fd(pstderr[PIPE_READ]);
+            if (!startup._stdin.redirected()) {
+                close_fd(pstdin[PIPE_WRITE]);
             }
-            dup2(pstderr[PIPE_WRITE], STDERR_FILENO);
-        }
+            if (!startup._stdout.redirected()) {
+                close_fd(pstdout[PIPE_READ]);
+            }
 
-        close_fd(pstdin[PIPE_READ]);
-        close_fd(pstdout[PIPE_WRITE]);
-        close_fd(pstderr[PIPE_WRITE]);
+            dup2(pstdin[PIPE_READ], STDIN_FILENO);
+            dup2(pstdout[PIPE_WRITE], STDOUT_FILENO);
 
-        // command-line and environments
-        size_t asize = startup._cmdline.size();
-        size_t esize = startup._env.size();
-        char *argv[asize + 1];
-        char *envp[esize + 1];
+            /*
+             * pay special attention to stderr,
+             * there are 2 cases:
+             *      1. redirect stderr to stdout
+             *      2. redirect stderr to a file
+             */
+            if (startup.merge_outputs) {
+                // redirect stderr to stdout
+                dup2(pstdout[PIPE_WRITE], STDERR_FILENO);
+            } else {
+                // redirect stderr to a file
+                if (!startup._stderr.redirected()) {
+                    close_fd(pstderr[PIPE_READ]);
+                }
+                dup2(pstderr[PIPE_WRITE], STDERR_FILENO);
+            }
 
-        // argv and envp are always terminated with a nullptr
-        argv[asize] = nullptr;
-        envp[esize] = nullptr;
+            close_fd(pstdin[PIPE_READ]);
+            close_fd(pstdout[PIPE_WRITE]);
+            close_fd(pstderr[PIPE_WRITE]);
 
-        // copy command-line arguments
-        for (std::size_t i = 0; i < asize; ++i) {
-            argv[i] = const_cast<char *>(startup._cmdline[i].c_str());
-        }
+            // command-line and environments
+            size_t asize = startup._cmdline.size();
+            size_t esize = startup._env.size();
+            char *argv[asize + 1];
+            char *envp[esize + 1];
 
-        // copy environment variables
-        std::vector<std::string> envs;
-        std::stringstream buffer;
-        for (const auto &e : startup._env) {
-            buffer.str("");
-            buffer.clear();
-            buffer << e.first << "=" << e.second;
-            envs.emplace_back(buffer.str());
-        }
+            // argv and envp are always terminated with a nullptr
+            argv[asize] = nullptr;
+            envp[esize] = nullptr;
 
-        for (std::size_t i = 0; i < esize; ++i) {
-            envp[i] = const_cast<char *>(envs[i].c_str());
-        }
+            // copy command-line arguments
+            for (std::size_t i = 0; i < asize; ++i) {
+                argv[i] = const_cast<char *>(startup._cmdline[i].c_str());
+            }
 
-        // close everything
-        if (!close_all_descriptors()) {
-            // try luck failed, close the old way
-            int max_fd = static_cast<int>(sysconf(_SC_OPEN_MAX));
-            for (int fd = FAIL_FILENO + 1; fd < max_fd; fd++) {
-                if (close(fd) == -1 && errno != EBADF) {
-                    // oops, we cannot close this fd
-                    // TODO: should we report this as an error?
-                    continue;
+            // copy environment variables
+            std::vector<std::string> envs;
+            std::stringstream buffer;
+            for (const auto &e : startup._env) {
+                buffer.str("");
+                buffer.clear();
+                buffer << e.first << "=" << e.second;
+                envs.emplace_back(buffer.str());
+            }
+
+            for (std::size_t i = 0; i < esize; ++i) {
+                envp[i] = const_cast<char *>(envs[i].c_str());
+            }
+
+            // close everything
+            if (!close_all_descriptors()) {
+                // try luck failed, close the old way
+                int max_fd = static_cast<int>(sysconf(_SC_OPEN_MAX));
+                for (int fd = FAIL_FILENO + 1; fd < max_fd; fd++) {
+                    if (close(fd) == -1 && errno != EBADF) {
+                        // oops, we cannot close this fd
+                        // TODO: should we report this as an error?
+                        continue;
+                    }
                 }
             }
+
+            // change cwd
+            if (chdir(startup._cwd.c_str()) != 0) {
+                // do not use mpp::throw_ex
+                throw mpp::runtime_error();
+            }
+
+            // make 100% sure the fail pipe will be closed,
+            // or the parent may get stuck in read_fully.
+            if (fcntl(FAIL_FILENO, F_SETFD, FD_CLOEXEC) == -1) {
+                // oops, we lost our double-insurance
+                throw mpp::runtime_error();
+            }
+
+            // run subprocess
+            mpp_execvpe(argv[0], const_cast<const char **>(argv), envp);
+
+        } catch (...) {
+            // the child failed to exec, tell our parent.
+            {
+                int errnum = errno;
+                ssize_t result = 0;
+                do {
+                    result = write(FAIL_FILENO, &errnum, sizeof(errnum));
+                } while ((result == -1) && (errno == EINTR));
+            } // destroy errnum explicitly.
+
+            close(FAIL_FILENO);
+            _exit(-1);
         }
-
-        // change cwd
-        if (chdir(startup._cwd.c_str()) != 0) {
-            mpp::throw_ex<mpp::runtime_error>("unable to change current working directory");
-        }
-
-        // run subprocess
-        mpp_execvpe(argv[0], const_cast<const char **>(argv), envp);
-
-        // TODO: report error
-        _exit(1);
-        mpp::throw_ex<mpp::runtime_error>("unable to exec commands in subprocess");
     }
 
-    void create_process_impl(const process_startup &startup,
-                             process_info &info,
+    void create_process_impl(const process_startup &startup, process_info &info,
                              fd_type *pstdin, fd_type *pstdout, fd_type *pstderr) {
+        // the child_proc will use this pipe to
+        // tell parent whether the process has started.
+        fd_type pfail[2] = {FD_INVALID, FD_INVALID};
+        if (!create_pipe(pfail)) {
+            mpp::throw_ex<mpp::runtime_error>("unable to create communication pipe");
+        }
+
         pid_t pid = fork();
+
         if (pid < 0) {
             mpp::throw_ex<mpp::runtime_error>("unable to fork subprocess");
 
         } else if (pid == 0) {
-            // in child process
-            child_proc(startup, info, pstdin, pstdout, pstderr);
+            // in child process, pfail will be closed in child_proc
+            child_proc(startup, info, pstdin, pstdout, pstderr, pfail);
+            std::terminate();
 
         } else {
             // in parent process
+            // RAII for pfail
+
+            // receive exec call result form child
+            close_fd(pfail[PIPE_WRITE]);
+            int child_errno = 0;
+
+            switch (read_fully(pfail[PIPE_READ], &child_errno, sizeof(child_errno))) {
+                case 0:
+                    // child exec succeeded.
+                    break;
+                case sizeof(child_errno):
+                    // child failed to exec, we will wait it.
+                    waitpid(pid, nullptr, 0);
+                    mpp::throw_ex<mpp::runtime_error>("child exec failed: " + std::string(strerror(child_errno)));
+                    break;
+                default:
+                    mpp::throw_ex<mpp::runtime_error>("read failed: " + std::string(strerror(errno)));
+                    break;
+            }
+
+            close_fd(pfail[PIPE_READ]);
+
             if (!startup._stdin.redirected()) {
                 close_fd(pstdin[PIPE_READ]);
             }
