@@ -256,6 +256,7 @@ namespace mpp_impl {
         }
     }
 
+    __attribute__((noreturn))
     static void child_proc(const process_startup &startup, process_info &info,
                            fd_type *pstdin, fd_type *pstdout, fd_type *pstderr,
                            fd_type *pfail) {
@@ -390,7 +391,8 @@ namespace mpp_impl {
         } else if (pid == 0) {
             // in child process, pfail will be closed in child_proc
             child_proc(startup, info, pstdin, pstdout, pstderr, pfail);
-            std::terminate();
+
+            // child never returns
 
         } else {
             // in parent process
