@@ -351,7 +351,7 @@ namespace mpp_impl {
                 }
                 if (close(fd) == -1 && errno != EBADF) {
                     // oops, we cannot close this fd
-                    // TODO: should we report this as an error?
+                    MOZART_LOGEV("failed to close inherit fd");
                     continue;
                 }
             }
