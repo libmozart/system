@@ -7,7 +7,7 @@
  */
 #include <mozart++/core>
 
-#ifndef MOZART_PLATFORM_WIN32
+#ifdef MOZART_PLATFORM_UNIX
 
 #include <mozart++/process>
 #include <mozart++/string>
@@ -23,7 +23,7 @@
 #include <sys/wait.h>
 #include <csignal>
 
-#ifdef __APPLE__
+#ifdef MOZART_PLATFORM_DARWIN
 #define FD_DIR "/dev/fd"
 #define dirent64 dirent
 #define readdir64 readdir
@@ -31,7 +31,7 @@
 #define FD_DIR "/proc/self/fd"
 #endif
 
-#ifdef __APPLE__
+#ifdef MOZART_PLATFORM_DARWIN
 #include <crt_externs.h>
 #define environ (*_NSGetEnviron())
 #else
@@ -513,9 +513,9 @@ namespace mpp_impl {
                 mpp::throw_ex<mpp::runtime_error>("should not reach here");
             }
 
-#if defined(__APPLE__)
+#if defined(MOZART_PLATFORM_DARWIN)
             void *handler = reinterpret_cast<void *>(sa.__sigaction_u.__sa_handler);
-#elif defined(__linux__)
+#elif defined(MOZART_PLATFORM_LINUX)
             void *handler = reinterpret_cast<void *>(sa.sa_handler);
 #endif
 
