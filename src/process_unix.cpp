@@ -356,6 +356,7 @@ namespace mpp_impl {
 
             // run subprocess
             mpp_execvpe(argv[0], const_cast<const char **>(argv), envp);
+            throw mpp::runtime_error();
 
         } catch (...) {
             // the child failed to exec, tell our parent.
