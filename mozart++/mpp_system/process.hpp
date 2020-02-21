@@ -130,14 +130,14 @@ namespace mpp {
         }
 
         int wait_for() {
-            if (is_exited() && _this->_exit_code >= 0) {
+            if (has_exited() && _this->_exit_code >= 0) {
                 return _this->_exit_code;
             }
             _this->_exit_code = mpp_impl::wait_for(_this->_info);
             return _this->_exit_code;
         }
 
-        bool is_exited() const {
+        bool has_exited() const {
             return mpp_impl::process_exited(_this->_info);
         }
 
