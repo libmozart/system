@@ -39,6 +39,53 @@ extern char **environ;
 #endif
 
 namespace mpp_impl {
+    /**
+     * We use -1 to indicate that a process is still running,
+     * bacause the return value of a process can never be -1.
+     */
+    static constexpr int PROCESS_STILL_ALIVE = -1;
+    static constexpr int PROCESS_POLL_FAILED = -2;
+
+    /**
+     * Poll child process status without reaping the exitValue.
+     * waitid() is standard on all POSIX platforms.
+     * Note: waitid on Mac OS X 10.7 seems to be broken;
+     * it does not return the exit status consistently.
+     */
+    static int poll_process_status(int pid) {
+        siginfo_t info;
+        memset(&info, '\0', sizeof(info));
+
+        if (waitid(P_PID, pid, &info, WEXITED | WSTOPPED | WNOHANG | WNOWAIT) == -1) {
+            // cannot get process status at this moment
+            // return early in case of undefined behavior.
+            return PROCESS_POLL_FAILED;
+        }
+
+        switch (info.si_code) {
+            case CLD_EXITED:
+                // The child exited normally, get its exit code
+                return info.si_status;
+            case CLD_KILLED:
+            case CLD_DUMPED:
+                // The child exited because of a signal.
+                // The best value to return is 0x80 + signal number,
+                // because that is what all Unix shells do, and because
+                // it allows callers to distinguish between process exit and
+                // oricess death by signal.
+                //
+                // Breaking changes happens if we are running on solaris:
+                // the historical behaviour on Solaris is to return the
+                // original signal number, but we will ignore that!
+                return 0x80 + WTERMSIG(info.si_status);
+            case CLD_STOPPED:
+                return 0x80 + WSTOPSIG(info.si_status);
+            default:
+                // process is still alive
+                return PROCESS_STILL_ALIVE;
+        }
+    }
+
     static bool close_all_descriptors(int from_fd, int fail_fd) {
         DIR *dp = nullptr;
         struct dirent64 *dirp = nullptr;
@@ -462,35 +509,27 @@ namespace mpp_impl {
     }
 
     int wait_for(const process_info &info) {
-        int status;
-        while (waitpid(info._pid, &status, 0) < 0) {
-            switch (errno) {
-                case ECHILD:
-                    return 0;
-                case EINTR:
-                    break;
-                default:
-                    return -1;
-            }
-        }
+        while (true) {
+            int status = poll_process_status(info._pid);
+            if (status == PROCESS_STILL_ALIVE) {
+                // continue waiting
+                continue;
 
-        if (WIFEXITED(status)) {
-            // The child exited normally, get its exit code
-            return WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
-            // The child exited because of a signal.
-            // The best value to return is 0x80 + signal number,
-            // because that is what all Unix shells do, and because
-            // it allows callers to distinguish between process exit and
-            // oricess death by signal.
-            //
-            // Breaking changes happens if we are running on solaris:
-            // the historical behaviour on Solaris is to return the
-            // original signal number, but we will ignore that!
-            return 0x80 + WTERMSIG(status);
-        } else {
-            // unknown exit code, pass it through
-            return status;
+            } else if (status == PROCESS_POLL_FAILED) {
+                switch (errno) {
+                    case ECHILD:
+                        // The process specified by pid does not exist
+                        // or is not a child of the calling process.
+                        return 0;
+                    default:
+                        // cannot get exit code
+                        return -1;
+                }
+
+            } else {
+                // the process has exited.
+                return status;
+            }
         }
     }
 
@@ -502,9 +541,9 @@ namespace mpp_impl {
         // if WNOHANG was specified and one or more child(ren)
         // specified by pid exist, but have not yet changed state,
         // then 0 is returned. On error, -1 is returned.
-        int result = waitpid(info._pid, nullptr, WNOHANG);
+        int status = poll_process_status(info._pid);
 
-        if (result == -1) {
+        if (status == PROCESS_POLL_FAILED) {
             if (errno != ECHILD) {
                 // when WNOHANG was set, errno could only be ECHILD
                 mpp::throw_ex<mpp::runtime_error>("should not reach here");
@@ -548,7 +587,7 @@ namespace mpp_impl {
             }
         }
 
-        return result == 0;
+        return status != PROCESS_STILL_ALIVE;
     }
 }
 
