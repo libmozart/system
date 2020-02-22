@@ -174,7 +174,7 @@ namespace mpp_impl {
             return nullptr;
         }
 
-        char *p = reinterpret_cast<char *>(pathv + pathvsize);
+        char *p = reinterpret_cast<char *>(pathv) + pathvsize;
         memcpy(p, path, pathsize);
 
         // split PATH by replacing ':' with '\0'
